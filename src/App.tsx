@@ -339,10 +339,129 @@ export default function App() {
   const STREAM_URL = "https://servidor39-5.brlogic.com:8902/live";
 
   const fetchClientSideNews = async (): Promise<NewsItem[]> => {
-    // Attempt 1: Fetch directly from WordPress JSON REST API of Vitrine do Sul (often supporting CORS by default)
+    // Attempt 1: Fetch raw XML feed using AllOrigins CORS proxy with direct browser DOMParser
+    try {
+      const rssFeed = "https://www.vitrinedosul.com.br/rss.xml";
+      const api = "https://api.allorigins.win/raw?url=" + encodeURIComponent(rssFeed);
+      const res = await fetch(api);
+      if (res.ok) {
+        const text = await res.text();
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(text, "text/xml");
+        const xmlItems = Array.from(xmlDoc.querySelectorAll("item")).slice(0, 9);
+        if (xmlItems.length > 0) {
+          return xmlItems.map((item) => {
+            const title = item.querySelector("title")?.textContent || "Notícia Regional";
+            const link = item.querySelector("link")?.textContent || "https://www.vitrinedosul.com.br";
+            const description = item.querySelector("description")?.textContent || "";
+            const pubDate = item.querySelector("pubDate")?.textContent || new Date().toISOString();
+
+            // Extract image using tags / media:content / description regex
+            let image = "";
+            const enclosure = item.querySelector("enclosure");
+            
+            // Try namespace query selectors for media elements
+            const mediaContent = item.querySelector("media\\:content") || item.querySelector("content") || item.querySelector("thumbnail");
+            
+            if (mediaContent) {
+              image = mediaContent.getAttribute("url") || "";
+            } else if (enclosure) {
+              image = enclosure.getAttribute("url") || "";
+            } else {
+              const imgMatch = description.match(/<img.*?src="(.*?)"/);
+              if (imgMatch && imgMatch[1]) {
+                image = imgMatch[1];
+              }
+            }
+
+            if (!image) {
+              image = "https://images.unsplash.com/photo-1541872703-74c5e44368f9?w=800&q=80";
+            }
+
+            // Clean description HTML tags
+            const cleanDescription = description
+              .replace(/(<([^>]+)>)/gi, "")
+              .replace(/&nbsp;/g, " ")
+              .replace(/&amp;/g, "&")
+              .trim();
+
+            const truncatedDesc = cleanDescription.length > 150 
+              ? cleanDescription.substring(0, 150) + "..." 
+              : cleanDescription + "...";
+
+            return {
+              title,
+              link,
+              pubDate,
+              description: truncatedDesc || "Confira os detalhes desta matéria no Portal Vitrine do Sul.",
+              imageUrl: image,
+              source: "Portal Vitrine do Sul"
+            };
+          });
+        }
+      }
+    } catch (err) {
+      console.warn("[Client RSS AllOrigins raw XML] Failed:", err);
+    }
+
+    // Attempt 2: Fetch via rss2json API (the most stable browser-based CORS-safe RSS client parser)
+    const rss2jsonUrls = [
+      `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent("https://www.vitrinedosul.com.br/rss.xml")}`,
+      `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent("https://www.vitrinedosul.com.br/feed/")}`,
+      `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent("https://vitrinedosul.com.br/rss.xml")}`,
+      `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent("https://vitrinedosul.com.br/feed/")}`
+    ];
+
+    for (const url of rss2jsonUrls) {
+      try {
+        const res = await fetch(url);
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.status === "ok" && Array.isArray(data.items) && data.items.length > 0) {
+            return data.items.slice(0, 9).map((item: any) => {
+              let imageUrl = item.thumbnail || (item.enclosure && item.enclosure.link);
+              if (!imageUrl) {
+                const imgRegex = /<img[^>]+src="([^">]+)"/i;
+                const match = imgRegex.exec(item.description || "") || imgRegex.exec(item.content || "");
+                if (match && match[1]) imageUrl = match[1];
+              }
+              if (!imageUrl) {
+                imageUrl = "https://images.unsplash.com/photo-1541872703-74c5e44368f9?w=800&q=80";
+              }
+
+              // Strip HTML tags from description and cap length beautifully
+              let desc = "Confira os detalhes completos desta matéria no Portal Vitrine do Sul.";
+              if (item.description) {
+                desc = item.description
+                  .replace(/<[^>]*>/g, "")
+                  .replace(/&nbsp;/g, " ")
+                  .replace(/&amp;/g, "&")
+                  .trim();
+                if (desc.length > 150) {
+                  desc = desc.substring(0, 150) + "...";
+                }
+              }
+
+              return {
+                title: item.title || "Notícia Regional",
+                link: item.link || "https://www.vitrinedosul.com.br",
+                pubDate: item.pubDate || new Date().toISOString(),
+                description: desc,
+                imageUrl,
+                source: "Portal Vitrine do Sul"
+              };
+            });
+          }
+        }
+      } catch (err) {
+        console.warn(`[Client RSS rss2json fallback] RSS2JSON failed for ${url}:`, err);
+      }
+    }
+
+    // Attempt 3: Fetch directly from WordPress JSON REST API of Vitrine do Sul (often supporting CORS by default)
     const wpUrls = [
-      "https://www.vitrinedosul.com.br/wp-json/wp/v2/posts?per_page=3&_embed=1",
-      "https://vitrinedosul.com.br/wp-json/wp/v2/posts?per_page=3&_embed=1"
+      "https://www.vitrinedosul.com.br/wp-json/wp/v2/posts?per_page=9&_embed=1",
+      "https://vitrinedosul.com.br/wp-json/wp/v2/posts?per_page=9&_embed=1"
     ];
 
     for (const url of wpUrls) {
@@ -351,7 +470,7 @@ export default function App() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const posts = await res.json();
         if (Array.isArray(posts) && posts.length > 0) {
-          return posts.slice(0, 3).map((post: any) => {
+          return posts.slice(0, 9).map((post: any) => {
             let imageUrl = "https://images.unsplash.com/photo-1541872703-74c5e44368f9?w=800&q=80";
             if (post._embedded && post._embedded['wp:featuredmedia'] && post._embedded['wp:featuredmedia'][0]) {
               imageUrl = post._embedded['wp:featuredmedia'][0].source_url || imageUrl;
@@ -388,7 +507,7 @@ export default function App() {
       }
     }
 
-    // Attempt 2: Use AllOrigins (a stable, open CORS proxy) to query the WordPress API
+    // Attempt 4: Use AllOrigins (a stable, open CORS proxy) to query the WordPress API
     for (const url of wpUrls) {
       try {
         const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
@@ -397,7 +516,7 @@ export default function App() {
         const wrapper = await res.json();
         const posts = JSON.parse(wrapper.contents);
         if (Array.isArray(posts) && posts.length > 0) {
-          return posts.slice(0, 3).map((post: any) => {
+          return posts.slice(0, 9).map((post: any) => {
             let imageUrl = "https://images.unsplash.com/photo-1541872703-74c5e44368f9?w=800&q=80";
             if (post._embedded && post._embedded['wp:featuredmedia'] && post._embedded['wp:featuredmedia'][0]) {
               imageUrl = post._embedded['wp:featuredmedia'][0].source_url || imageUrl;
@@ -434,7 +553,7 @@ export default function App() {
       }
     }
 
-    // Attempt 3: Fetch verified live backup news feed via CORS Proxy
+    // Attempt 5: Fetch verified live backup news feed via CORS Proxy
     try {
       const g1FeedUrl = 'https://g1.globo.com/rss/g1/sc/santa-catarina/';
       const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(g1FeedUrl)}`;
@@ -443,7 +562,7 @@ export default function App() {
         const wrapper = await res.json();
         const parser = new DOMParser();
         const xmlDoc = parser.parseFromString(wrapper.contents, "text/xml");
-        const xmlItems = Array.from(xmlDoc.querySelectorAll("item")).slice(0, 3);
+        const xmlItems = Array.from(xmlDoc.querySelectorAll("item")).slice(0, 9);
         if (xmlItems.length > 0) {
           return xmlItems.map((node) => {
             const title = node.querySelector("title")?.textContent || "Cobertura Regional de SC";
@@ -855,79 +974,59 @@ export default function App() {
               </p>
             </div>
           ) : news.length > 0 ? (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8">
-              {/* Highlight News (First Item) */}
-              <a
-                href={news[0].link}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="group lg:col-span-7 flex flex-col rounded-[2rem] overflow-hidden relative isolate min-h-[400px] lg:min-h-[500px]"
-              >
-                <img
-                  src={news[0].imageUrl}
-                  alt={news[0].title}
-                  className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-700 -z-20"
-                />
-                <div className="absolute inset-0 bg-gradient-to-t from-slate-900/90 via-slate-900/40 to-transparent -z-10"></div>
-
-                <div className="p-8 lg:p-10 flex flex-col justify-end h-full mt-auto">
-                  <div className="flex flex-wrap items-center gap-2 mb-4">
-                    <span className="bg-[#ff3e5e] text-white text-[10px] font-black uppercase px-2.5 py-1 rounded-full tracking-wider">
-                      DESTAQUE
-                    </span>
-                    <span className="bg-white/15 backdrop-blur-md text-white border border-white/10 text-[10px] font-black uppercase px-2.5 py-1 rounded-full tracking-wider">
-                      {news[0].source || "Portal Vitrine do Sul"}
-                    </span>
-                    <span className="text-white/80 text-xs font-semibold tracking-wide ml-1">
-                      {new Date(news[0].pubDate).toLocaleDateString("pt-BR")}
-                    </span>
-                  </div>
-                  <h3 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-white mb-4 group-hover:text-[#fce315] transition-colors leading-[1.15] tracking-tight">
-                    {news[0].title}
-                  </h3>
-                  <p
-                    className="text-white/80 text-sm sm:text-base line-clamp-2 md:line-clamp-3 font-medium max-w-2xl"
-                    dangerouslySetInnerHTML={{ __html: news[0].description }}
-                  ></p>
-                </div>
-              </a>
- 
-              {/* Side News (Next 2 Items) */}
-              <div className="lg:col-span-5 flex flex-col gap-6 lg:gap-8">
-                {news.slice(1, 3).map((item, idx) => (
-                  <a
+            <div className="space-y-6 md:space-y-8 animate-fade-in">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 lg:gap-8">
+                {news.slice(0, 9).map((item, idx) => (
+                  <div
                     key={idx}
-                    href={item.link}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="group bg-white rounded-[2rem] p-4 flex flex-col sm:flex-row gap-5 shadow-[0_10px_40px_-10px_rgba(0,0,0,0.08)] hover:shadow-[0_20px_50px_-15px_rgba(0,0,0,0.12)] hover:-translate-y-1 transition-all duration-300 border border-slate-100 flex-1"
+                    className="group bg-white rounded-[18px] overflow-hidden shadow-[0_5px_20px_rgba(0,0,0,0.08)] hover:-translate-y-1.5 transition-all duration-300 border border-slate-100 flex flex-col h-full"
                   >
-                    <div className="w-full sm:w-2/5 aspect-[4/3] rounded-2xl overflow-hidden shrink-0 relative">
+                    {/* 220px Height image frame specified in user's class */}
+                    <div className="h-[220px] w-full overflow-hidden shrink-0 relative">
                       <img
                         src={item.imageUrl}
                         alt={item.title}
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                        referrerPolicy="no-referrer"
                       />
                     </div>
-                    <div className="flex flex-col justify-center py-2 sm:pr-4 flex-1">
-                      <div className="flex flex-wrap items-center gap-1.5 mb-2">
-                        <span className="text-[#ff3e5e] text-[10px] font-black uppercase tracking-wider bg-red-50 px-2 py-0.5 rounded">
-                          {item.source || "Portal Vitrine do Sul"}
-                        </span>
-                        <span className="text-slate-300 text-[10px]">•</span>
-                        <span className="text-slate-400 text-[10px] font-bold tracking-wider uppercase">
-                          {new Date(item.pubDate).toLocaleDateString("pt-BR")}
-                        </span>
+
+                    {/* Card Content with 22px padding specified by user */}
+                    <div className="p-[22px] flex flex-col flex-1 justify-between">
+                      <div className="space-y-3 mb-5 flex-grow">
+                        <div className="flex items-center gap-1.5 text-[10px] font-bold tracking-wider text-slate-400 uppercase">
+                          <span className="text-[#ff3e5e] bg-[#ff3e5e]/8 px-2 py-0.5 rounded">
+                            {item.source || "Portal Vitrine do Sul"}
+                          </span>
+                          <span>•</span>
+                          <span>
+                            {new Date(item.pubDate).toLocaleDateString("pt-BR")}
+                          </span>
+                        </div>
+
+                        {/* 22px Title specified in user's css */}
+                        <h2 className="text-[21px] md:text-[22px] font-bold text-[#111] group-hover:text-[#ff3e5e] transition-colors leading-[1.4] line-clamp-2">
+                          {item.title}
+                        </h2>
+
+                        {/* 15px text with 1.6 relative leading as demanded in .card p */}
+                        <p
+                          className="text-[#555] text-[15px] leading-[1.6] line-clamp-3 font-medium"
+                          dangerouslySetInnerHTML={{ __html: item.description }}
+                        ></p>
                       </div>
-                      <h3 className="text-lg lg:text-xl font-bold text-[#5c3e7b] mb-3 group-hover:text-[#ff3e5e] transition-colors leading-tight line-clamp-3">
-                        {item.title}
-                      </h3>
-                      <p
-                        className="text-slate-500 text-sm line-clamp-2 font-medium"
-                        dangerouslySetInnerHTML={{ __html: item.description }}
-                      ></p>
+
+                      {/* Matching signature brand pink-red action button instead of non-theme ferrari red */}
+                      <a
+                        href={item.link}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-block px-[22px] py-[12px] bg-[#ff3e5e] hover:bg-[#e42d4c] text-white font-bold text-center rounded-[8px] transition-colors text-sm cursor-pointer border-none tracking-wide"
+                      >
+                        Ler notícia
+                      </a>
                     </div>
-                  </a>
+                  </div>
                 ))}
               </div>
             </div>

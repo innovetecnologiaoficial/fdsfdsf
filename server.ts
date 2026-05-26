@@ -131,10 +131,10 @@ app.get('/api/news', async (req, res) => {
 
   // --- LAYER 1: VITRINE DO SUL WORDPRESS JSON REST API (MOST ROBUST & DIRECT) ---
   const WP_API_URLS = [
-    'https://www.vitrinedosul.com.br/wp-json/wp/v2/posts?per_page=3&_embed=1',
-    'https://vitrinedosul.com.br/wp-json/wp/v2/posts?per_page=3&_embed=1',
-    'http://www.vitrinedosul.com.br/wp-json/wp/v2/posts?per_page=3&_embed=1',
-    'http://vitrinedosul.com.br/wp-json/wp/v2/posts?per_page=3&_embed=1'
+    'https://www.vitrinedosul.com.br/wp-json/wp/v2/posts?per_page=9&_embed=1',
+    'https://vitrinedosul.com.br/wp-json/wp/v2/posts?per_page=9&_embed=1',
+    'http://www.vitrinedosul.com.br/wp-json/wp/v2/posts?per_page=9&_embed=1',
+    'http://vitrinedosul.com.br/wp-json/wp/v2/posts?per_page=9&_embed=1'
   ];
 
   for (const url of WP_API_URLS) {
@@ -156,7 +156,7 @@ app.get('/api/news', async (req, res) => {
       if (response.ok) {
         const posts = await response.json();
         if (Array.isArray(posts) && posts.length > 0) {
-          const items = posts.slice(0, 3).map((post: any) => {
+          const items = posts.slice(0, 9).map((post: any) => {
             let imageUrl = 'https://images.unsplash.com/photo-1541872703-74c5e44368f9?w=800&q=80';
             
             // Extract featured image URL safely
@@ -215,7 +215,83 @@ app.get('/api/news', async (req, res) => {
     }
   }
 
-  // --- LAYER 2: VITRINE DO SUL RSS FEEDS (XML FALLBACK) ---
+  // --- LAYER 2: VITRINE DO SUL RSS FEEDS VIA RSS2JSON PUBLIC API (PREVENTS SAX UNEXPECTED CLOSE TAG ERRORS) ---
+  const RSS2JSON_URLS = [
+    'https://api.rss2json.com/v1/api.json?rss_url=https%3A%2F%2Fwww.vitrinedosul.com.br%2Frss.xml',
+    'https://api.rss2json.com/v1/api.json?rss_url=https%3A%2F%2Fwww.vitrinedosul.com.br%2Ffeed%2F',
+    'https://api.rss2json.com/v1/api.json?rss_url=https%3A%2F%2Fvitrinedosul.com.br%2Frss.xml',
+    'https://api.rss2json.com/v1/api.json?rss_url=https%3A%2F%2Fvitrinedosul.com.br%2Ffeed%2F'
+  ];
+
+  for (const proxyUrl of RSS2JSON_URLS) {
+    try {
+      console.log(`[RSS2JSON Proxy] Fetching sanitized feed: ${proxyUrl}`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6500);
+
+      const response = await fetch(proxyUrl, {
+        headers: { 'Accept': 'application/json' },
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data && data.status === 'ok' && Array.isArray(data.items) && data.items.length > 0) {
+          const items = data.items.slice(0, 9).map((item: any) => {
+            // Find thumbnail or extract from description/content
+            let imageUrl = item.thumbnail || (item.enclosure && item.enclosure.link);
+            if (!imageUrl) {
+              const imgRegex = /<img[^>]+src="([^">]+)"/i;
+              const match = imgRegex.exec(item.description || '') || imgRegex.exec(item.content || '');
+              if (match && match[1]) imageUrl = match[1];
+            }
+            if (!imageUrl) {
+              imageUrl = 'https://images.unsplash.com/photo-1541872703-74c5e44368f9?w=800&q=80';
+            }
+
+            let desc = 'Confira os detalhes completos desta matéria especial acessando o Portal Vitrine do Sul.';
+            if (item.description) {
+              desc = item.description
+                .replace(/<[^>]*>/g, '') // strip html tags
+                .replace(/&nbsp;/g, ' ')
+                .replace(/&amp;/g, '&')
+                .replace(/&#8230;/g, '...')
+                .trim();
+              if (desc.length > 180) {
+                desc = desc.substring(0, 180).trim() + '...';
+              }
+            }
+
+            let safePubDate = item.pubDate;
+            if (!safePubDate || isNaN(Date.parse(safePubDate))) {
+              safePubDate = new Date().toISOString();
+            }
+
+            return {
+              title: item.title || 'Notícia Regional',
+              link: item.link || 'https://www.vitrinedosul.com.br',
+              pubDate: safePubDate,
+              description: desc || 'Confira os detalhes completos desta matéria especial acessando o Portal Vitrine do Sul.',
+              imageUrl: imageUrl,
+              source: 'Portal Vitrine do Sul'
+            };
+          });
+
+          if (items.length > 0) {
+            newsCache = items;
+            lastFetchTime = now;
+            console.log(`[RSS2JSON Proxy] Succeeded for: ${proxyUrl}`);
+            return res.json(items);
+          }
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[RSS2JSON Proxy] Checked URL failed:`, e.message || e);
+    }
+  }
+
+  // --- LAYER 3: VITRINE DO SUL RSS FEEDS (XML FALLBACK) ---
   const PRIMARY_FEED_URLS = [
     'https://www.vitrinedosul.com.br/feed/',
     'https://www.vitrinedosul.com.br/rss.xml',
@@ -225,13 +301,13 @@ app.get('/api/news', async (req, res) => {
     'http://www.vitrinedosul.com.br/rss.xml'
   ];
 
-  // --- LAYER 3: VITRINE DO SUL RSS FEEDS (XML FETCHING) ---
+  // --- LAYER 4: VITRINE DO SUL RSS FEEDS (XML FETCHING) ---
   for (const url of PRIMARY_FEED_URLS) {
     try {
       console.log(`[RSS] Fetching primary Vitrine do Sul: ${url}`);
       const feed = await fetchXmlFeed(url);
       
-      const items = feed.items.slice(0, 3).map(item => {
+      const items = feed.items.slice(0, 9).map(item => {
         const imageUrl = extractImageUrl(item);
         
         // Date parsing safety to prevent React crashes on Invalid dates
@@ -256,7 +332,7 @@ app.get('/api/news', async (req, res) => {
         console.log(`[RSS] Primary XML parse succeeded for: ${url}`);
         return res.json(items);
       }
-    } catch (e) {
+    } catch (e: any) {
       console.warn(`[RSS] Primary URL ${url} skipped:`, e.message || e);
     }
   }
@@ -267,7 +343,7 @@ app.get('/api/news', async (req, res) => {
       console.log('[Gemini Fallback] Querying live search for real Vitrine do Sul news...');
       const response = await ai.models.generateContent({
         model: 'gemini-3.5-flash',
-        contents: 'Pesquise no Google usando ferramentas de busca as notícias mais recentes (últimas 48 horas ou desta semana) publicadas pelo Portal Vitrine do Sul (vitrinedosul.com.br) ou notícias reais urgentes da região de Criciúma e Sul de Santa Catarina. É MANDATÓRIAMENTE obrigatório retornar APENAS notícias de fatos reais que de fato aconteceram e existem na internet, com links reais de notícias funcionais. Você NÃO PODE inventar ou imaginar notícias ou fakenews. Retorne em formato JSON contendo exatamente 3 notícias contendo título (title), link real do artigo (link), data de publicação ISO-8601 (pubDate), descrição resumida verdadeira (description) em português, e a URL da imagem de capa (imageUrl). Se não encontrar resultados reais suficientes, retorne uma lista vazia [].',
+        contents: 'Pesquise no Google usando ferramentas de busca as notícias mais recentes (últimas 48 horas ou desta semana) publicadas pelo Portal Vitrine do Sul (vitrinedosul.com.br) ou notícias reais urgentes da região de Criciúma e Sul de Santa Catarina. É MANDATÓRIAMENTE obrigatório retornar APENAS notícias de fatos reais que de fato aconteceram e existem na internet, com links reais de notícias funcionais. Você NÃO PODE inventar ou imaginar notícias ou fakenews. Retorne em formato JSON contendo exatamente 9 notícias contendo título (title), link real do artigo (link), data de publicação ISO-8601 (pubDate), descrição resumida verdadeira (description) em português, e a URL da imagem de capa (imageUrl). Se não encontrar resultados reais suficientes, retorne uma lista vazia [].',
         config: {
           tools: [{ googleSearch: {} }],
           responseMimeType: 'application/json',
@@ -292,7 +368,7 @@ app.get('/api/news', async (req, res) => {
       if (responseText) {
         const parsedItems = JSON.parse(responseText);
         if (Array.isArray(parsedItems) && parsedItems.length > 0) {
-          const sanitizedItems = parsedItems.slice(0, 3).map(item => {
+          const sanitizedItems = parsedItems.slice(0, 9).map(item => {
             let safeDate = item.pubDate;
             if (!safeDate || isNaN(Date.parse(safeDate))) {
               safeDate = new Date().toISOString();
@@ -313,7 +389,7 @@ app.get('/api/news', async (req, res) => {
           return res.json(sanitizedItems);
         }
       }
-    } catch (geminiError) {
+    } catch (geminiError: any) {
       console.error('[Gemini Fallback] Live lookup failed:', geminiError.message || geminiError);
     }
   }
@@ -331,7 +407,7 @@ app.get('/api/news', async (req, res) => {
       console.log(`[Backup RSS] Loading active verified source: ${backup.source} (${backup.url})`);
       const feed = await fetchXmlFeed(backup.url);
       
-      const items = feed.items.slice(0, 3).map(item => {
+      const items = feed.items.slice(0, 9).map(item => {
         const imageUrl = extractImageUrl(item);
         
         let safePubDate = item.pubDate;
