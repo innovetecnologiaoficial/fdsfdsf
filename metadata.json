@@ -1,0 +1,8 @@
+{
+  "name": "Remix: Remix: Clube 87.9 FM",
+  "description": "Um rádio moderna e elegante que toca ao vivo, integrando as notícias mais recentes do Portal Vitrine do Sul.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
