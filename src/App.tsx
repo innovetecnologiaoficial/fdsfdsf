@@ -43,6 +43,7 @@ interface NewsItem {
   pubDate: string;
   description: string;
   imageUrl: string;
+  source?: string;
 }
 
 const topSongs = [
@@ -337,19 +338,174 @@ export default function App() {
   // In a real scenario, this would be the actual stream URL!
   const STREAM_URL = "https://servidor39-5.brlogic.com:8902/live";
 
+  const fetchClientSideNews = async (): Promise<NewsItem[]> => {
+    // Attempt 1: Fetch directly from WordPress JSON REST API of Vitrine do Sul (often supporting CORS by default)
+    const wpUrls = [
+      "https://www.vitrinedosul.com.br/wp-json/wp/v2/posts?per_page=3&_embed=1",
+      "https://vitrinedosul.com.br/wp-json/wp/v2/posts?per_page=3&_embed=1"
+    ];
+
+    for (const url of wpUrls) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const posts = await res.json();
+        if (Array.isArray(posts) && posts.length > 0) {
+          return posts.slice(0, 3).map((post: any) => {
+            let imageUrl = "https://images.unsplash.com/photo-1541872703-74c5e44368f9?w=800&q=80";
+            if (post._embedded && post._embedded['wp:featuredmedia'] && post._embedded['wp:featuredmedia'][0]) {
+              imageUrl = post._embedded['wp:featuredmedia'][0].source_url || imageUrl;
+            } else {
+              const imgRegex = /<img[^>]+src="([^">]+)"/i;
+              if (post.content && post.content.rendered) {
+                const match = imgRegex.exec(post.content.rendered);
+                if (match && match[1]) imageUrl = match[1];
+              }
+            }
+
+            let desc = "Confira a matéria completa acessando o Portal Vitrine do Sul.";
+            if (post.excerpt && post.excerpt.rendered) {
+              desc = post.excerpt.rendered
+                .replace(/<[^>]*>/g, '')
+                .replace(/&nbsp;/g, ' ')
+                .replace(/&amp;/g, '&')
+                .replace(/&#8230;/g, '...')
+                .trim();
+            }
+
+            return {
+              title: post.title?.rendered || "Notícia Regional",
+              link: post.link || "https://www.vitrinedosul.com.br",
+              pubDate: post.date_gmt || post.date || new Date().toISOString(),
+              description: desc,
+              imageUrl,
+              source: "Portal Vitrine do Sul"
+            };
+          });
+        }
+      } catch (err) {
+        console.warn(`[Client RSS WP fallback] Direct WP RSS failed for ${url}:`, err);
+      }
+    }
+
+    // Attempt 2: Use AllOrigins (a stable, open CORS proxy) to query the WordPress API
+    for (const url of wpUrls) {
+      try {
+        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+        const res = await fetch(proxyUrl);
+        if (!res.ok) throw new Error(`Proxy HTTP ${res.status}`);
+        const wrapper = await res.json();
+        const posts = JSON.parse(wrapper.contents);
+        if (Array.isArray(posts) && posts.length > 0) {
+          return posts.slice(0, 3).map((post: any) => {
+            let imageUrl = "https://images.unsplash.com/photo-1541872703-74c5e44368f9?w=800&q=80";
+            if (post._embedded && post._embedded['wp:featuredmedia'] && post._embedded['wp:featuredmedia'][0]) {
+              imageUrl = post._embedded['wp:featuredmedia'][0].source_url || imageUrl;
+            } else {
+              const imgRegex = /<img[^>]+src="([^">]+)"/i;
+              if (post.content && post.content.rendered) {
+                const match = imgRegex.exec(post.content.rendered);
+                if (match && match[1]) imageUrl = match[1];
+              }
+            }
+
+            let desc = "Confira os detalhes completos desta matéria no Portal Vitrine do Sul.";
+            if (post.excerpt && post.excerpt.rendered) {
+              desc = post.excerpt.rendered
+                .replace(/<[^>]*>/g, '')
+                .replace(/&nbsp;/g, ' ')
+                .replace(/&amp;/g, '&')
+                .replace(/&#8230;/g, '...')
+                .trim();
+            }
+
+            return {
+              title: post.title?.rendered || "Notícia Regional",
+              link: post.link || "https://www.vitrinedosul.com.br",
+              pubDate: post.date_gmt || post.date || new Date().toISOString(),
+              description: desc,
+              imageUrl,
+              source: "Portal Vitrine do Sul"
+            };
+          });
+        }
+      } catch (err) {
+        console.warn(`[Client RSS WP proxy fallback] WP proxy failed for ${url}:`, err);
+      }
+    }
+
+    // Attempt 3: Fetch verified live backup news feed via CORS Proxy
+    try {
+      const g1FeedUrl = 'https://g1.globo.com/rss/g1/sc/santa-catarina/';
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(g1FeedUrl)}`;
+      const res = await fetch(proxyUrl);
+      if (res.ok) {
+        const wrapper = await res.json();
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(wrapper.contents, "text/xml");
+        const xmlItems = Array.from(xmlDoc.querySelectorAll("item")).slice(0, 3);
+        if (xmlItems.length > 0) {
+          return xmlItems.map((node) => {
+            const title = node.querySelector("title")?.textContent || "Cobertura Regional de SC";
+            const link = node.querySelector("link")?.textContent || "https://g1.globo.com/sc/santa-catarina/";
+            const pubDate = node.querySelector("pubDate")?.textContent || new Date().toISOString();
+            const rawDesc = node.querySelector("description")?.textContent || "";
+            
+            // simple tag removal for description
+            const description = rawDesc.replace(/<[^>]*>/g, '').trim() || "Fique atualizado sobre todos os acontecimentos de Santa Catarina acessando o portal completo.";
+            
+            // extract thumbnail or media
+            let imageUrl = "https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=800&q=80";
+            const imgMatch = rawDesc.match(/<img[^>]+src="([^">]+)"/i);
+            if (imgMatch && imgMatch[1]) {
+              imageUrl = imgMatch[1];
+            } else {
+              const mediaContent = node.getElementsByTagName("media:content")[0];
+              if (mediaContent && mediaContent.getAttribute("url")) {
+                imageUrl = mediaContent.getAttribute("url") || imageUrl;
+              }
+            }
+
+            return {
+              title,
+              link,
+              pubDate,
+              description,
+              imageUrl,
+              source: "G1 Santa Catarina"
+            };
+          });
+        }
+      }
+    } catch (err) {
+      console.warn("[Client RSS G1 fallback] G1 CORS fallback failed:", err);
+    }
+
+    throw new Error("Não foi possível carregar notícias reais conectando aos servidores. Verifique sua conexão.");
+  };
+
   useEffect(() => {
     fetch("/api/news")
       .then((res) => {
-        if (!res.ok) throw new Error("Falha ao carregar notícias");
+        if (!res.ok) throw new Error("Falha ao carregar notícias pelo servidor");
         return res.json();
       })
       .then((data) => {
         setNews(data);
         setLoading(false);
       })
-      .catch((err) => {
-        setError(err.message);
-        setLoading(false);
+      .catch((serverErr) => {
+        console.warn("[Backend Loader] Missing or failed Node endpoint. Running client-side WordPress/CORS live engine...", serverErr);
+        // Seamless client-side dynamic WordPress connector for Hostinger static upload builds!
+        fetchClientSideNews()
+          .then((clientData) => {
+            setNews(clientData);
+            setLoading(false);
+          })
+          .catch((clientErr) => {
+            setError(clientErr.message || "Erro de conexão ao carregar notícias");
+            setLoading(false);
+          });
       });
 
     fetchWeather();
@@ -715,11 +871,14 @@ export default function App() {
                 <div className="absolute inset-0 bg-gradient-to-t from-slate-900/90 via-slate-900/40 to-transparent -z-10"></div>
 
                 <div className="p-8 lg:p-10 flex flex-col justify-end h-full mt-auto">
-                  <div className="flex items-center space-x-3 mb-4">
-                    <span className="bg-[#ff3e5e] text-white text-[11px] font-black uppercase px-3 py-1 rounded-full tracking-wider">
+                  <div className="flex flex-wrap items-center gap-2 mb-4">
+                    <span className="bg-[#ff3e5e] text-white text-[10px] font-black uppercase px-2.5 py-1 rounded-full tracking-wider">
                       DESTAQUE
                     </span>
-                    <span className="text-white/80 text-sm font-semibold tracking-wide">
+                    <span className="bg-white/15 backdrop-blur-md text-white border border-white/10 text-[10px] font-black uppercase px-2.5 py-1 rounded-full tracking-wider">
+                      {news[0].source || "Portal Vitrine do Sul"}
+                    </span>
+                    <span className="text-white/80 text-xs font-semibold tracking-wide ml-1">
                       {new Date(news[0].pubDate).toLocaleDateString("pt-BR")}
                     </span>
                   </div>
@@ -732,7 +891,7 @@ export default function App() {
                   ></p>
                 </div>
               </a>
-
+ 
               {/* Side News (Next 2 Items) */}
               <div className="lg:col-span-5 flex flex-col gap-6 lg:gap-8">
                 {news.slice(1, 3).map((item, idx) => (
@@ -751,9 +910,15 @@ export default function App() {
                       />
                     </div>
                     <div className="flex flex-col justify-center py-2 sm:pr-4 flex-1">
-                      <p className="text-[#ff3e5e] text-[11px] font-black uppercase tracking-wider mb-2">
-                        {new Date(item.pubDate).toLocaleDateString("pt-BR")}
-                      </p>
+                      <div className="flex flex-wrap items-center gap-1.5 mb-2">
+                        <span className="text-[#ff3e5e] text-[10px] font-black uppercase tracking-wider bg-red-50 px-2 py-0.5 rounded">
+                          {item.source || "Portal Vitrine do Sul"}
+                        </span>
+                        <span className="text-slate-300 text-[10px]">•</span>
+                        <span className="text-slate-400 text-[10px] font-bold tracking-wider uppercase">
+                          {new Date(item.pubDate).toLocaleDateString("pt-BR")}
+                        </span>
+                      </div>
                       <h3 className="text-lg lg:text-xl font-bold text-[#5c3e7b] mb-3 group-hover:text-[#ff3e5e] transition-colors leading-tight line-clamp-3">
                         {item.title}
                       </h3>
